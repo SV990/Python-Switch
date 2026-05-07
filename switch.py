@@ -9,12 +9,24 @@ import subprocess
 import ctypes
 from typing import List, Tuple
 import re
+from datetime import datetime
 
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
+    except Exception:
         return False
+
+def get_version_from_file():
+    try:
+        with open('version.txt', 'r', encoding='utf-8') as f:
+            content = f.read()
+            match = re.search(r'ProductVersion\s*,\s*u?[\'"](\d+\.\d+\.\d+)', content)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return '1.0.0'
 
 class PythonSwitcher:
     def __init__(self, master):
@@ -26,15 +38,17 @@ class PythonSwitcher:
             master.destroy()
             return
         
+        self.version = get_version_from_file()
+        
         # 设置窗口图标
         try:
             master.iconbitmap(default="python.ico")
-        except:
+        except Exception:
             pass
         
         # 设置窗口大小和位置
-        window_width = 800
-        window_height = 500
+        window_width = 900
+        window_height = 600
         screen_width = master.winfo_screenwidth()
         screen_height = master.winfo_screenheight()
         x = (screen_width - window_width) // 2
@@ -64,7 +78,7 @@ class PythonSwitcher:
         title_label.pack(side=tk.LEFT)
         
         # 版本信息
-        version_label = ttk.Label(title_frame, text="v1.0.0", 
+        version_label = ttk.Label(title_frame, text=f"v{self.version}", 
                                 font=('Microsoft YaHei UI', 8))
         version_label.pack(side=tk.RIGHT, padx=5)
 
@@ -81,11 +95,11 @@ class PythonSwitcher:
                                        columns=('版本', '路径', '状态'),
                                        show='headings',
                                        height=8)
-        self.version_tree.heading('版本', text='版本')
-        self.version_tree.heading('路径', text='安装路径')
-        self.version_tree.heading('状态', text='状态')
-        self.version_tree.column('版本', width=100)
-        self.version_tree.column('路径', width=300)
+        self.version_tree.heading('版本', text='版本', command=lambda: self.sort_treeview('版本', False))
+        self.version_tree.heading('路径', text='安装路径', command=lambda: self.sort_treeview('路径', False))
+        self.version_tree.heading('状态', text='状态', command=lambda: self.sort_treeview('状态', False))
+        self.version_tree.column('版本', width=120)
+        self.version_tree.column('路径', width=400)
         self.version_tree.column('状态', width=100)
         self.version_tree.pack(fill=tk.BOTH, expand=True)
         
@@ -112,6 +126,8 @@ class PythonSwitcher:
                   command=self.refresh_versions).pack(pady=5, fill=tk.X)
         ttk.Button(right_frame, text="切换选中版本", 
                   command=self.switch_selected_version).pack(pady=5, fill=tk.X)
+        ttk.Button(right_frame, text="恢复上次备份", 
+                  command=self.restore_backup).pack(pady=5, fill=tk.X)
         
         # 分隔线
         ttk.Separator(right_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
@@ -121,7 +137,7 @@ class PythonSwitcher:
         current_version_frame.pack(fill=tk.X, pady=5)
         self.current_version_label = ttk.Label(current_version_frame, 
                                              text="检测中...",
-                                             wraplength=150)
+                                             wraplength=180)
         self.current_version_label.pack(fill=tk.X)
         
         # 状态标签
@@ -131,11 +147,70 @@ class PythonSwitcher:
         
         # 保存的路径文件
         self.config_file = Path.home() / '.python_switcher_config.json'
+        self.backup_file = Path.home() / '.python_switcher_backup.json'
         
         # 加载版本并更新当前版本显示
         self.load_saved_paths()
         self.refresh_versions()
         self.update_current_version()
+    
+    def sort_treeview(self, col, reverse):
+        """对 Treeview 进行排序"""
+        items = [(self.version_tree.set(k, col), k) for k in self.version_tree.get_children('')]
+        items.sort(reverse=reverse)
+        
+        for index, (val, k) in enumerate(items):
+            self.version_tree.move(k, '', index)
+        
+        # 反转排序方式以便下次点击
+        self.version_tree.heading(col, command=lambda: self.sort_treeview(col, not reverse))
+    
+    def backup_env(self, path_value):
+        """备份当前环境变量"""
+        try:
+            backup_data = {
+                'timestamp': datetime.now().isoformat(),
+                'path': path_value
+            }
+            with open(self.backup_file, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"备份失败: {e}")
+            return False
+    
+    def restore_backup(self):
+        """恢复上次备份的环境变量"""
+        if not self.backup_file.exists():
+            messagebox.showwarning("警告", "没有找到备份文件")
+            return
+        
+        try:
+            with open(self.backup_file, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+            
+            if not messagebox.askyesno("确认", f"确定要恢复 {backup_data['timestamp']} 的备份吗？"):
+                return
+            
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                              "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+                              0, winreg.KEY_ALL_ACCESS) as key:
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, backup_data['path'])
+                
+                # 通知其他程序环境变量已更改
+                HWND_BROADCAST = 0xFFFF
+                WM_SETTINGCHANGE = 0x001A
+                SMTO_ABORTIFHUNG = 0x0002
+                ctypes.windll.user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 
+                                                       0, "Environment", SMTO_ABORTIFHUNG, 5000)
+            
+            self.status_label.config(text="已恢复环境变量备份")
+            self.refresh_versions()
+            self.update_current_version()
+            messagebox.showinfo("成功", "环境变量已恢复！\n请重新打开命令行窗口以使更改生效。")
+        
+        except Exception as e:
+            messagebox.showerror("错误", f"恢复备份失败: {str(e)}")
 
     def get_python_paths_from_registry(self) -> List[Tuple[str, str]]:
         """从注册表获取所有可能的 Python 安装路径"""
@@ -158,7 +233,7 @@ class PythonSwitcher:
                                     path = winreg.QueryValue(install_key, None)
                                     if path and Path(path).exists():
                                         paths.append((version, path))
-                            except:
+                            except OSError:
                                 # 尝试其他可能的安装路径键
                                 for subkey in ['PythonPath', 'InstallDir']:
                                     try:
@@ -167,12 +242,12 @@ class PythonSwitcher:
                                             if path and Path(path).exists():
                                                 paths.append((version, path))
                                                 break
-                                    except:
+                                    except OSError:
                                         continue
                             i += 1
-                        except WindowsError:
+                        except OSError:
                             break
-            except:
+            except OSError:
                 continue
         
         return list(set(paths))  # 删除重复项
@@ -187,23 +262,24 @@ class PythonSwitcher:
                     return "未知版本"
             
             result = subprocess.run([str(python_exe), "--version"], 
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, timeout=5)
             version = result.stdout.strip().replace("Python ", "")
             return version
-        except:
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
             return "未知版本"
 
     def update_current_version(self):
         """更新当前系统 Python 版本显示"""
         try:
             result = subprocess.run(["python", "--version"], 
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, timeout=5)
             version = result.stdout.strip()
-            path = subprocess.run(["where", "python"], 
-                               capture_output=True, text=True).stdout.strip()
+            path_result = subprocess.run(["where", "python"], 
+                                       capture_output=True, text=True, timeout=5)
+            path = path_result.stdout.strip()
             self.current_version_label.config(
-                text=f"{version}\n路径: {path.split()[0]}")
-        except:
+                text=f"{version}\n路径: {path.splitlines()[0] if path else '未知'}")
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, IndexError):
             self.current_version_label.config(text="未检测到系统 Python")
 
     def refresh_versions(self):
@@ -221,7 +297,7 @@ class PythonSwitcher:
                               0, winreg.KEY_READ) as key:
                 sys_path = winreg.QueryValueEx(key, "Path")[0]
                 current_paths = sys_path.split(";")
-        except:
+        except OSError:
             current_paths = []
         
         # 添加注册表中的版本
@@ -274,19 +350,36 @@ class PythonSwitcher:
                               "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
                               0, winreg.KEY_ALL_ACCESS) as key:
                 path_value = winreg.QueryValueEx(key, "Path")[0]
+                
+                # 备份当前环境变量
+                self.backup_env(path_value)
+                
                 path_list = path_value.split(";")
                 
-                # 移除旧的 Python 路径
-                path_list = [p for p in path_list if not any(
-                    x in p.lower() for x in ['\\python', '\\scripts'])]
+                # 更安全地移除旧的 Python 路径 - 只移除我们已知的路径
+                # 首先收集所有已检测到的 Python 路径
+                python_paths_to_remove = set()
+                for item in self.version_tree.get_children():
+                    item_values = self.version_tree.item(item)['values']
+                    if len(item_values) >= 2:
+                        p_path = item_values[1].rstrip('\\')
+                        python_paths_to_remove.add(p_path)
+                        python_paths_to_remove.add(str(Path(p_path) / "Scripts"))
+                
+                # 只移除明确的 Python 路径
+                new_path_list = []
+                for p in path_list:
+                    p_clean = p.rstrip('\\')
+                    if p_clean not in python_paths_to_remove and p:
+                        new_path_list.append(p)
                 
                 # 将新的 Python 路径添加到最前面
-                path_list.insert(0, script_path)
-                path_list.insert(0, python_path)
+                new_path_list.insert(0, script_path)
+                new_path_list.insert(0, python_path)
                 
                 # 清理空路径并确保唯一性
-                path_list = list(filter(None, dict.fromkeys(path_list)))
-                new_path_value = ";".join(path_list)
+                new_path_list = list(filter(None, dict.fromkeys(new_path_list)))
+                new_path_value = ";".join(new_path_list)
                 
                 # 设置新的环境变量
                 winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path_value)
@@ -313,17 +406,17 @@ class PythonSwitcher:
         self.custom_paths = []
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r') as f:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.custom_paths = json.load(f)
-            except:
+            except (OSError, json.JSONDecodeError):
                 pass
     
     def save_paths(self):
         """保存自定义的 Python 路径"""
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(self.custom_paths, f)
-        except Exception as e:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.custom_paths, f, ensure_ascii=False, indent=2)
+        except OSError as e:
             messagebox.showerror("错误", f"保存配置文件失败: {str(e)}")
     
     def add_python_path(self):
